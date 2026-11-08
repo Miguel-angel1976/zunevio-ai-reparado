@@ -1,0 +1,76 @@
+
+name: ZUNEVIO AI - Compilar APK y AAB
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  android-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Configurar Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Preparar proyecto Android desde ZIP
+        shell: bash
+        run: |
+          set -e
+          mkdir -p extracted
+          unzip -q ZUNEVIO_AI_REPARADO.zip -d extracted
+
+          WRAPPER=$(find extracted -type f -name gradlew -print -quit)
+
+          if [ -z "$WRAPPER" ]; then
+            echo "ERROR: No se encontró gradlew dentro del ZIP"
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$WRAPPER")
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          chmod +x "$WRAPPER"
+
+          if [ ! -f "$PROJECT_DIR/settings.gradle" ] && [ ! -f "$PROJECT_DIR/settings.gradle.kts" ]; then
+            echo "ERROR: No se encontró settings.gradle"
+            exit 1
+          fi
+
+      - name: Compilar APK y AAB
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          ./gradlew --no-daemon --stacktrace assembleDebug bundleRelease
+
+      - name: Preparar archivos descargables
+        if: success()
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          find "$PROJECT_DIR" -type f \( -name "*.apk" -o -name "*.aab" \) \
+            -path "*/build/outputs/*" -exec cp {} artifacts/ \;
+
+          ls -lh artifacts
+
+      - name: Guardar APK y AAB
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZUNEVIO-AI-APK-AAB
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 14
