@@ -7,11 +7,15 @@ on:
       - main
       - principal
     paths:
-      - 'ZUNEVIO_AI_REPARADO.zip'
+      - 'ZUNEVIO_AI_REPARADO (2).zip'
       - '.github/workflows/android-build.yml'
 
 permissions:
   contents: read
+
+concurrency:
+  group: zunevio-ai-android-build
+  cancel-in-progress: false
 
 jobs:
   android-build:
@@ -23,11 +27,12 @@ jobs:
       - name: Descargar repositorio
         uses: actions/checkout@v4
 
-      - name: Configurar Java 17
+      - name: Configurar Java 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
+          cache: gradle
 
       - name: Configurar Android SDK
         uses: android-actions/setup-android@v3
@@ -47,11 +52,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          ZIP_FILE="ZUNEVIO_AI_REPARADO.zip"
+          ZIP_FILE="ZUNEVIO_AI_REPARADO (2).zip"
 
           if [ ! -f "$ZIP_FILE" ]; then
             echo "::error::No existe $ZIP_FILE en la raíz del repositorio."
-            echo "Sube el ZIP con ese nombre exacto."
+            echo "Archivos ZIP encontrados:"
+            find . -maxdepth 2 -type f -iname '*.zip' -print
             exit 1
           fi
 
@@ -77,7 +83,7 @@ jobs:
 
           if [ ! -f "$PROJECT_DIR/settings.gradle" ] && \
              [ ! -f "$PROJECT_DIR/settings.gradle.kts" ]; then
-            echo "::error::No se encuentra settings.gradle."
+            echo "::error::Falta settings.gradle o settings.gradle.kts."
             exit 1
           fi
 
@@ -99,31 +105,45 @@ jobs:
           chmod +x "$WRAPPER"
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Proyecto preparado: $PROJECT_DIR"
 
-          echo "Proyecto localizado correctamente: $PROJECT_DIR"
+      - name: Comprobar entorno
+        shell: bash
+        run: |
+          set -euo pipefail
+          java -version
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "Android SDK instalado correctamente."
 
       - name: Limpiar proyecto
         shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
-          ./gradlew --no-daemon clean
+          ./gradlew --no-daemon --stacktrace clean
 
-      - name: Ejecutar pruebas y generar APK Debug, APK Release y AAB
+      - name: Ejecutar pruebas unitarias
         shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
+          ./gradlew --no-daemon --stacktrace testDebugUnitTest
 
-          ./gradlew \
-            --no-daemon \
-            --stacktrace \
-            testDebugUnitTest \
-            assembleDebug \
-            assembleRelease \
-            bundleRelease
+      - name: Generar APK Debug
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          ./gradlew --no-daemon --stacktrace assembleDebug
 
-      - name: Verificar archivos generados
+      - name: Generar APK Release y AAB Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          ./gradlew --no-daemon --stacktrace assembleRelease bundleRelease
+
+      - name: Verificar y recopilar APK y AAB
         shell: bash
         run: |
           set -euo pipefail
@@ -134,22 +154,29 @@ jobs:
           RELEASE_APK="$PROJECT_DIR/app/build/outputs/apk/release"
           RELEASE_AAB="$PROJECT_DIR/app/build/outputs/bundle/release"
 
-          mapfile -t DEBUG_FILES < <(find "$DEBUG_APK" -maxdepth 1 -type f -name '*.apk')
-          mapfile -t RELEASE_FILES < <(find "$RELEASE_APK" -maxdepth 1 -type f -name '*.apk')
-          mapfile -t AAB_FILES < <(find "$RELEASE_AAB" -maxdepth 1 -type f -name '*.aab')
+          for DIR in "$DEBUG_APK" "$RELEASE_APK" "$RELEASE_AAB"; do
+            if [ ! -d "$DIR" ]; then
+              echo "::error::No existe el directorio de salida: $DIR"
+              exit 1
+            fi
+          done
 
-          if [ "${#DEBUG_FILES[@]}" -lt 1 ]; then
-            echo "::error::No se ha generado el APK Debug."
+          mapfile -t DEBUG_FILES < <(find "$DEBUG_APK" -maxdepth 1 -type f -name '*.apk' -print)
+          mapfile -t RELEASE_FILES < <(find "$RELEASE_APK" -maxdepth 1 -type f -name '*.apk' -print)
+          mapfile -t AAB_FILES < <(find "$RELEASE_AAB" -maxdepth 1 -type f -name '*.aab' -print)
+
+          if [ "${#DEBUG_FILES[@]}" -ne 1 ]; then
+            echo "::error::Se esperaba un APK Debug. Encontrados: ${#DEBUG_FILES[@]}"
             exit 1
           fi
 
-          if [ "${#RELEASE_FILES[@]}" -lt 1 ]; then
-            echo "::error::No se ha generado el APK Release."
+          if [ "${#RELEASE_FILES[@]}" -ne 1 ]; then
+            echo "::error::Se esperaba un APK Release. Encontrados: ${#RELEASE_FILES[@]}"
             exit 1
           fi
 
-          if [ "${#AAB_FILES[@]}" -lt 1 ]; then
-            echo "::error::No se ha generado el AAB Release."
+          if [ "${#AAB_FILES[@]}" -ne 1 ]; then
+            echo "::error::Se esperaba un AAB Release. Encontrados: ${#AAB_FILES[@]}"
             exit 1
           fi
 
@@ -157,12 +184,21 @@ jobs:
           cp "${RELEASE_FILES[0]}" "$GITHUB_WORKSPACE/entrega/ZUNEVIO_AI_RELEASE.apk"
           cp "${AAB_FILES[0]}" "$GITHUB_WORKSPACE/entrega/ZUNEVIO_AI_RELEASE.aab"
 
-          for FILE in "$GITHUB_WORKSPACE"/entrega/*; do
+          for FILE in "$GITHUB_WORKSPACE"/entrega/*.apk "$GITHUB_WORKSPACE"/entrega/*.aab; do
             test -s "$FILE"
             unzip -t "$FILE"
+            echo "Correcto: $(basename "$FILE")"
           done
 
-          echo "Los tres archivos existen y han superado la prueba de integridad."
+      - name: Comprobar firmas de los APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+
+          "$APKSIGNER" verify --verbose "$GITHUB_WORKSPACE/entrega/ZUNEVIO_AI_DEBUG.apk"
+          "$APKSIGNER" verify --verbose "$GITHUB_WORKSPACE/entrega/ZUNEVIO_AI_RELEASE.apk"
 
       - name: Calcular SHA-256
         shell: bash
