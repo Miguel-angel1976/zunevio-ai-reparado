@@ -31,7 +31,6 @@ jobs:
         uses: android-actions/setup-android@v4
         with:
           accept-android-sdk-licenses: true
-          packages: ''
 
       - name: Instalar componentes Android SDK
         shell: bash
@@ -39,9 +38,11 @@ jobs:
           set -euo pipefail
 
           echo "Instalando Android SDK..."
+
           sdkmanager --install \
             "platforms;android-36" \
-            "build-tools;35.0.0"
+            "build-tools;35.0.0" \
+            "build-tools;36.0.0"
 
           echo "Verificando instalación..."
           sdkmanager --list_installed
@@ -51,14 +52,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          ZIP_FILE="ZUNEVIO_AI_REPARADO.zip"
+          ZIP_FILE="ZUNEVIO_AI_REPARADO (2).zip"
+
+          echo "Buscando archivo del proyecto..."
 
           if [ ! -f "$ZIP_FILE" ]; then
-            echo "ERROR: No existe $ZIP_FILE en la raíz del repositorio."
+            echo "ERROR: No existe $ZIP_FILE"
+            echo "Archivos disponibles en el repositorio:"
+            ls -la
             exit 1
           fi
 
-          echo "Verificando ZIP..."
+          echo "Verificando integridad del ZIP..."
           unzip -t "$ZIP_FILE"
 
           mkdir -p extracted
@@ -89,11 +94,16 @@ jobs:
             exit 1
           fi
 
+          if [ ! -f "$PROJECT_DIR/gradle/wrapper/gradle-wrapper.jar" ]; then
+            echo "ERROR: Falta gradle-wrapper.jar."
+            exit 1
+          fi
+
           chmod +x "$WRAPPER"
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Proyecto preparado: $PROJECT_DIR"
+          echo "Proyecto preparado correctamente: $PROJECT_DIR"
 
       - name: Comprobar configuración y compilar APK y AAB
         shell: bash
@@ -105,20 +115,25 @@ jobs:
           echo "===== JAVA ====="
           java -version
 
+          echo "===== ANDROID SDK ====="
+          echo "ANDROID_HOME=$ANDROID_HOME"
+
           echo "===== GRADLE ====="
           ./gradlew --version
 
-          echo "===== COMPILANDO APK Y AAB ====="
+          echo "===== LIMPIANDO PROYECTO ====="
+          ./gradlew --no-daemon clean
 
-          ./gradlew \
-            --no-daemon \
-            --stacktrace \
-            --warning-mode all \
-            clean \
-            assembleDebug \
-            bundleRelease
+          echo "===== GENERANDO APK DEBUG ====="
+          ./gradlew --no-daemon --stacktrace assembleDebug
 
-          echo "Compilación terminada."
+          echo "===== GENERANDO APK RELEASE ====="
+          ./gradlew --no-daemon --stacktrace assembleRelease
+
+          echo "===== GENERANDO AAB RELEASE ====="
+          ./gradlew --no-daemon --stacktrace bundleRelease
+
+          echo "COMPILACIÓN COMPLETADA."
 
       - name: Preparar y verificar APK y AAB
         if: success()
@@ -154,16 +169,24 @@ jobs:
           APK_COUNT=$(find artifacts -type f -name "*.apk" | wc -l)
           AAB_COUNT=$(find artifacts -type f -name "*.aab" | wc -l)
 
-          echo "APK: $APK_COUNT"
-          echo "AAB: $AAB_COUNT"
+          echo "APK encontrados: $APK_COUNT"
+          echo "AAB encontrados: $AAB_COUNT"
 
-          if [ "$APK_COUNT" -lt 1 ] || [ "$AAB_COUNT" -lt 1 ]; then
-            echo "ERROR: Faltan el APK o el AAB."
+          if [ "$APK_COUNT" -lt 2 ]; then
+            echo "ERROR: No se han generado los APK Debug y Release."
             exit 1
           fi
 
+          if [ "$AAB_COUNT" -lt 1 ]; then
+            echo "ERROR: No se ha generado el AAB Release."
+            exit 1
+          fi
+
+          echo "===== VERIFICANDO INTEGRIDAD ====="
+
           while IFS= read -r -d '' FILE; do
             unzip -t "$FILE" >/dev/null
+            sha256sum "$FILE"
             echo "Integridad correcta: $FILE"
           done < <(
             find artifacts -type f \
@@ -171,9 +194,10 @@ jobs:
               -print0
           )
 
-          echo "TODOS LOS ARCHIVOS HAN SUPERADO LA VERIFICACIÓN."
-
+          echo "===== ARCHIVOS GENERADOS ====="
           find artifacts -type f -printf '%p (%s bytes)\n'
+
+          echo "TODOS LOS ARCHIVOS HAN SUPERADO LA VERIFICACIÓN."
 
       - name: Guardar APK y AAB
         if: success()
