@@ -1,71 +1,144 @@
 
-name: ZUNEVIO AI - Compilar APK y AAB
+name: ZUNEVIO AI - APK y AAB del compilador
 
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - main
+      - principal
 
 permissions:
   contents: read
 
 jobs:
   android-build:
+    name: Compilar ZUNEVIO AI
     runs-on: ubuntu-latest
 
     steps:
+      # 1. Descargar el repositorio
       - name: Descargar repositorio
         uses: actions/checkout@v4
 
+      # 2. Configurar Java 21
       - name: Configurar Java 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
 
+      # 3. Configurar Android SDK
       - name: Configurar Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 12266719
+          accept-android-sdk-licenses: true
+          packages: |
+            platform-tools
+            platforms;android-36
+            build-tools;36.0.0
 
+      # 4. Comprobar y extraer el proyecto Android
       - name: Preparar proyecto Android desde ZIP
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
+          ZIP_FILE="ZUNEVIO_AI_REPARADO.zip"
+
+          if [ ! -f "$ZIP_FILE" ]; then
+            echo "ERROR: No se encuentra $ZIP_FILE en el repositorio."
+            exit 1
+          fi
+
           mkdir -p extracted
-          unzip -q ZUNEVIO_AI_REPARADO.zip -d extracted
+
+          unzip -q "$ZIP_FILE" -d extracted
 
           WRAPPER=$(find extracted -type f -name gradlew -print -quit)
 
           if [ -z "$WRAPPER" ]; then
-            echo "ERROR: No se encontró gradlew dentro del ZIP"
+            echo "ERROR: No se encontró gradlew dentro del ZIP."
             exit 1
           fi
 
           PROJECT_DIR=$(dirname "$WRAPPER")
+
+          echo "Proyecto Android encontrado en: $PROJECT_DIR"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
           chmod +x "$WRAPPER"
 
-          if [ ! -f "$PROJECT_DIR/settings.gradle" ] && [ ! -f "$PROJECT_DIR/settings.gradle.kts" ]; then
-            echo "ERROR: No se encontró settings.gradle"
+          if [ ! -f "$PROJECT_DIR/settings.gradle" ] && \
+             [ ! -f "$PROJECT_DIR/settings.gradle.kts" ]; then
+            echo "ERROR: No se encontró settings.gradle o settings.gradle.kts."
             exit 1
           fi
 
+          if [ ! -f "$PROJECT_DIR/build.gradle" ] && \
+             [ ! -f "$PROJECT_DIR/build.gradle.kts" ]; then
+            echo "ERROR: No se encontró el archivo build.gradle."
+            exit 1
+          fi
+
+          echo "Proyecto preparado correctamente."
+
+      # 5. Comprobar configuración y compilar APK y AAB
       - name: Compilar APK y AAB
         shell: bash
         run: |
-          cd "$PROJECT_DIR"
-          ./gradlew --no-daemon --stacktrace assembleDebug bundleRelease
+          set -euo pipefail
 
+          cd "$PROJECT_DIR"
+
+          echo "Comprobando versión de Java..."
+          java -version
+
+          echo "Comprobando Gradle..."
+          ./gradlew --version
+
+          echo "Iniciando compilación de APK y AAB..."
+
+          ./gradlew \
+            --no-daemon \
+            --stacktrace \
+            --warning-mode all \
+            clean \
+            assembleDebug \
+            bundleRelease
+
+          echo "Compilación finalizada correctamente."
+
+      # 6. Preparar archivos descargables
       - name: Preparar archivos descargables
         if: success()
         shell: bash
         run: |
+          set -euo pipefail
+
           mkdir -p artifacts
-          find "$PROJECT_DIR" -type f \( -name "*.apk" -o -name "*.aab" \) \
-            -path "*/build/outputs/*" -exec cp {} artifacts/ \;
 
-          ls -lh artifacts
+          find "$PROJECT_DIR" \
+            -type f \
+            \( -name "*.apk" -o -name "*.aab" \) \
+            -path "*/build/outputs/*" \
+            -exec cp -v {} artifacts/ \;
 
+          echo "Archivos generados:"
+          ls -lh artifacts/
+
+          if ! find artifacts -maxdepth 1 -type f -name "*.apk" | grep -q .; then
+            echo "ERROR: No se ha generado ningún APK."
+            exit 1
+          fi
+
+          if ! find artifacts -maxdepth 1 -type f -name "*.aab" | grep -q .; then
+            echo "ERROR: No se ha generado ningún AAB."
+            exit 1
+          fi
+
+      # 7. Guardar APK y AAB como artefactos descargables
       - name: Guardar APK y AAB
         if: success()
         uses: actions/upload-artifact@v4
